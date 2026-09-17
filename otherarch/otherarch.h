@@ -64,6 +64,8 @@ struct kcpp_params {
     float   fe_wave_phase        = 0.0f;  // sine wave phase in radians
     float   fe_entropy_threshold = 0.0f;  // skip lookahead below this normalized entropy (0 = never skip)
     float   fe_rel_prob_threshold = 0.0f; // lookahead only for candidates >= this fraction of top probability (0 = all)
+    float   fe_alpha_min         = -1.0f; // lower bound for wave-modulated alpha (0/0 pair = unset, use [-1,1])
+    float   fe_alpha_max         = 1.0f;  // upper bound for wave-modulated alpha
 
     std::string model_filename       = ""; // model path
     std::string prompt               = "";

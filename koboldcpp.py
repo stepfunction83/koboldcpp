@@ -424,7 +424,9 @@ class generation_inputs(ctypes.Structure):
                 ("fe_wave_period", ctypes.c_float),
                 ("fe_wave_phase", ctypes.c_float),
                 ("fe_entropy_threshold", ctypes.c_float),
-                ("fe_rel_prob_threshold", ctypes.c_float)]
+                ("fe_rel_prob_threshold", ctypes.c_float),
+                ("fe_alpha_min", ctypes.c_float),
+                ("fe_alpha_max", ctypes.c_float)]
 
 class generation_outputs(ctypes.Structure):
     _fields_ = [("status", ctypes.c_int),
@@ -2273,6 +2275,8 @@ def generate(genparams, stream_flag=False):
     fe_wave_phase = tryparsefloat(genparams.get('future_entropy_wave_phase', 0.0), 0.0)
     fe_entropy_threshold = tryparsefloat(genparams.get('future_entropy_entropy_threshold', 0.0), 0.0)
     fe_rel_prob_threshold = tryparsefloat(genparams.get('future_entropy_rel_prob_threshold', 0.0), 0.0)
+    fe_alpha_min = tryparsefloat(genparams.get('future_entropy_alpha_min', -1.0), -1.0)
+    fe_alpha_max = tryparsefloat(genparams.get('future_entropy_alpha_max', 1.0), 1.0)
     if adaptive_target>0 and min_p<=0 and top_p>=1.0: #adaptive p sampler requires a truncation sampler first, force a tiny min-p
         min_p = 0.002
     logit_biases = genparams.get('logit_bias', {})
@@ -2373,6 +2377,8 @@ def generate(genparams, stream_flag=False):
     inputs.fe_wave_phase = fe_wave_phase
     inputs.fe_entropy_threshold = fe_entropy_threshold
     inputs.fe_rel_prob_threshold = fe_rel_prob_threshold
+    inputs.fe_alpha_min = fe_alpha_min
+    inputs.fe_alpha_max = fe_alpha_max
     if mirostat in (1, 2):
         inputs.mirostat = mirostat
         inputs.mirostat_tau = mirostat_tau

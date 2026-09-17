@@ -2338,8 +2338,9 @@ static int apply_reasoning_budget(int id, const std::vector<int> & start_think, 
 // Each candidate token w is scored using the normalized Shannon entropy of the NEXT token
 // distribution that w would lead into, taken over its top-n tokens:
 //      s(w) = p(w)^a * Hhat(w)^b,   a = 1 - max(0, alpha),  b = 1 - max(0, -alpha)
-// where alpha in [-1, 1] crossfades between the original probabilities (alpha = -1, behaves like
-// conventional sampling) and pure future-optionality (alpha = +1, only entropy matters).
+// where alpha crossfades between the original probabilities (alpha = -1, behaves like conventional
+// sampling) and pure future-optionality (alpha = +1, only entropy matters); alpha is clamped to a
+// user-configurable range [fe_alpha_min, fe_alpha_max] (default [-1, 1]).
 // alpha can optionally be modulated by a sine wave across the generation (rhythmic decoding),
 // letting the text alternate between predictable and open-ended passages.
 // The lookahead requires one forward pass per candidate token; the resulting KV entries are
@@ -2407,7 +2408,7 @@ static bool sample_future_entropy(llama_token_data_array * candidates_p, const i
     float alpha = kcpp_data->fe_alpha;
     if (kcpp_data->fe_wave_period > 0.0f && kcpp_data->fe_wave_amplitude != 0.0f)
         alpha += kcpp_data->fe_wave_amplitude * sinf((2.0f * (float)M_PI / kcpp_data->fe_wave_period) * (float)fe_step + kcpp_data->fe_wave_phase);
-    alpha = std::min(1.0f, std::max(-1.0f, alpha));
+    alpha = std::min(kcpp_data->fe_alpha_max, std::max(kcpp_data->fe_alpha_min, alpha));
     const float p_exp = 1.0f - fmaxf(0.0f, alpha);
     const float h_exp = 1.0f - fmaxf(0.0f, -alpha);
 
@@ -6026,12 +6027,18 @@ generation_outputs gpttype_generate(const generation_inputs inputs)
 
     // future entropy sampler params
     kcpp_data->fe_top_n = (inputs.fe_top_n < 0) ? 0 : std::min(inputs.fe_top_n, 64);
-    kcpp_data->fe_alpha = std::min(1.0f, std::max(-1.0f, inputs.fe_alpha));
+    kcpp_data->fe_alpha = std::min(10.0f, std::max(-10.0f, inputs.fe_alpha));
     kcpp_data->fe_wave_amplitude = std::min(2.0f, std::max(0.0f, inputs.fe_wave_amplitude));
     kcpp_data->fe_wave_period = std::max(0.0f, inputs.fe_wave_period);
     kcpp_data->fe_wave_phase = inputs.fe_wave_phase;
     kcpp_data->fe_entropy_threshold = std::min(1.0f, std::max(0.0f, inputs.fe_entropy_threshold));
     kcpp_data->fe_rel_prob_threshold = std::min(1.0f, std::max(0.0f, inputs.fe_rel_prob_threshold));
+    float fe_amin = std::min(10.0f, std::max(-10.0f, inputs.fe_alpha_min));
+    float fe_amax = std::min(10.0f, std::max(-10.0f, inputs.fe_alpha_max));
+    if (fe_amin == 0.0f && fe_amax == 0.0f) { fe_amin = -1.0f; fe_amax = 1.0f; } // zero-initialized struct: bounds unset, use legacy defaults
+    if (fe_amin > fe_amax) std::swap(fe_amin, fe_amax);
+    kcpp_data->fe_alpha_min = fe_amin;
+    kcpp_data->fe_alpha_max = fe_amax;
     if (kcpp_data->fe_top_n >= 2)
     {
         if (file_format != FileFormat::GGUF_GENERIC || draft_ctx != nullptr)

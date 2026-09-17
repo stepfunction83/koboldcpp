@@ -160,6 +160,8 @@ struct generation_inputs
     const float fe_wave_phase = 0.0f;            // phase offset (radians) of the alpha sine wave
     const float fe_entropy_threshold = 0.0f;     // skip lookahead when the current normalized entropy is below this value (deterministic step); 0 = never skip
     const float fe_rel_prob_threshold = 0.0f;    // only compute lookahead for candidates whose probability is at least this fraction of the top candidate's; 0 = all candidates
+    const float fe_alpha_min = -1.0f;              // lower bound for (wave-modulated) alpha; 0/0 pair means unset and falls back to [-1, 1]
+    const float fe_alpha_max = 1.0f;               // upper bound for (wave-modulated) alpha
 };
 struct generation_outputs
 {
