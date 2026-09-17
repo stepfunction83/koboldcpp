@@ -160,3 +160,6 @@ conda/
 
 # Jetbrains idea folder
 .idea/
+Making LLMs Better at Creative Writing using Entropy.txt
+.gitignore
+MiniCPM5-1B.i1-IQ4_XS.gguf
