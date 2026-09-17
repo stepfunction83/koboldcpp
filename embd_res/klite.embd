@@ -4650,6 +4650,9 @@ Current version indicated by LITEVER below.
 		fe_rel_prob_threshold: 0.0,
 		fe_alpha_min: -1.0,
 		fe_alpha_max: 1.0,
+		fe_alpha_process: 0.0,
+		fe_ou_theta: 0.0,
+		fe_ou_sigma: 0.0,
 		adaptivep_target: -1.0,
 		adaptivep_decay: 0.9,
 		sampler_order: [6, 0, 1, 3, 4, 2, 5],
@@ -16924,6 +16927,9 @@ Current version indicated by LITEVER below.
 		document.getElementById("fe_rel_prob_threshold").value = localsettings.fe_rel_prob_threshold;
 		document.getElementById("fe_alpha_min").value = localsettings.fe_alpha_min;
 		document.getElementById("fe_alpha_max").value = localsettings.fe_alpha_max;
+		document.getElementById("fe_alpha_process").value = localsettings.fe_alpha_process;
+		document.getElementById("fe_ou_theta").value = localsettings.fe_ou_theta;
+		document.getElementById("fe_ou_sigma").value = localsettings.fe_ou_sigma;
 		document.getElementById("dry_base").value = localsettings.dry_base;
 		document.getElementById("dry_allowed_length").value = localsettings.dry_allowed_length;
 		document.getElementById("dry_penalty_last_n").value = localsettings.dry_penalty_last_n;
@@ -17353,6 +17359,9 @@ Current version indicated by LITEVER below.
 		document.getElementById("fe_rel_prob_threshold").value = cleannum(parseFloat(document.getElementById("fe_rel_prob_threshold").value), 0, 1);
 		document.getElementById("fe_alpha_min").value = cleannum(parseFloat(document.getElementById("fe_alpha_min").value), -10, 10);
 		document.getElementById("fe_alpha_max").value = cleannum(parseFloat(document.getElementById("fe_alpha_max").value), -10, 10);
+		document.getElementById("fe_alpha_process").value = cleannum(parseInt(document.getElementById("fe_alpha_process").value), 0, 1);
+		document.getElementById("fe_ou_theta").value = cleannum(parseFloat(document.getElementById("fe_ou_theta").value), 0, 1);
+		document.getElementById("fe_ou_sigma").value = cleannum(parseFloat(document.getElementById("fe_ou_sigma").value), 0, 10);
 		document.getElementById("miro_type").value = cleannum(parseInt(document.getElementById("miro_type").value), 0, 2);
 		document.getElementById("miro_tau").value = cleannum(parseFloat(document.getElementById("miro_tau").value), 0, 30);
 		document.getElementById("miro_eta").value = cleannum(parseFloat(document.getElementById("miro_eta").value), 0, 10);
@@ -17414,6 +17423,9 @@ Current version indicated by LITEVER below.
 			fe_rel_prob_threshold: parseFloat(document.getElementById("fe_rel_prob_threshold").value),
 			fe_alpha_min: parseFloat(document.getElementById("fe_alpha_min").value),
 			fe_alpha_max: parseFloat(document.getElementById("fe_alpha_max").value),
+			fe_alpha_process: parseInt(document.getElementById("fe_alpha_process").value),
+			fe_ou_theta: parseFloat(document.getElementById("fe_ou_theta").value),
+			fe_ou_sigma: parseFloat(document.getElementById("fe_ou_sigma").value),
 			miro_type: parseFloat(document.getElementById("miro_type").value),
 			miro_tau: parseFloat(document.getElementById("miro_tau").value),
 			miro_eta: parseFloat(document.getElementById("miro_eta").value),
@@ -17932,6 +17944,9 @@ Current version indicated by LITEVER below.
 		localsettings.fe_rel_prob_threshold = parseFloat(document.getElementById("fe_rel_prob_threshold").value);
 		localsettings.fe_alpha_min = parseFloat(document.getElementById("fe_alpha_min").value);
 		localsettings.fe_alpha_max = parseFloat(document.getElementById("fe_alpha_max").value);
+		localsettings.fe_alpha_process = parseInt(document.getElementById("fe_alpha_process").value);
+		localsettings.fe_ou_theta = parseFloat(document.getElementById("fe_ou_theta").value);
+		localsettings.fe_ou_sigma = parseFloat(document.getElementById("fe_ou_sigma").value);
 		localsettings.token_count_multiplier = parseInt(document.getElementById("token_count_multiplier").value);
 		localsettings.guidance_scale = parseFloat(document.getElementById("guidance_scale").value);
 		localsettings.guidance_prompt = document.getElementById("guidance_prompt").value;
@@ -22154,6 +22169,9 @@ Current version indicated by LITEVER below.
 			submit_payload.params.future_entropy_rel_prob_threshold = localsettings.fe_rel_prob_threshold;
 			submit_payload.params.future_entropy_alpha_min = localsettings.fe_alpha_min;
 			submit_payload.params.future_entropy_alpha_max = localsettings.fe_alpha_max;
+			submit_payload.params.future_entropy_alpha_process = localsettings.fe_alpha_process;
+			submit_payload.params.future_entropy_ou_theta = localsettings.fe_ou_theta;
+			submit_payload.params.future_entropy_ou_sigma = localsettings.fe_ou_sigma;
 		}
 
 		if(custom_kobold_endpoint != "" && is_using_kcpp_with_guidance() && localsettings.guidance_scale != 1 && localsettings.guidance_prompt!="")
@@ -32246,7 +32264,7 @@ Current version indicated by LITEVER below.
 										<div class="settinglabel settingcell">
 											<div title="Future Entropy Baseline Alpha" class="justifyleft" style="width:100%">Alpha</div>
 											<div class="justifyleft" style="width:100%">
-											<input title="Future Entropy Baseline Alpha (effective alpha is clamped to Min-A/Max-A)" class="settinglabel miniinput" type="text" inputmode="decimal" placeholder="0.0" value="0.0" id="fe_alpha"></div>
+											<input title="Future Entropy Baseline Alpha (effective alpha is clamped to Min-A/Max-A; past 1 the probability term drops out and the preference for open futures keeps sharpening)" class="settinglabel miniinput" type="text" inputmode="decimal" placeholder="0.0" value="0.0" id="fe_alpha"></div>
 										</div>
 									</div>
 								</div>
@@ -32294,6 +32312,29 @@ Current version indicated by LITEVER below.
 											<div title="Minimum relative probability for lookahead" class="justifyleft" style="width:100%">Min-RelP</div>
 											<div class="justifyleft" style="width:100%">
 											<input title="Only evaluate candidates with probability >= this fraction of the top token (0 = all)" class="settinglabel miniinput" type="text" inputmode="decimal" placeholder="0.0" value="0.0" id="fe_rel_prob_threshold"></div>
+										</div>
+									</div>
+								</div>
+							</div>
+							<div style="display:flex;width:100%;">
+								<div class="settinglabel settingcell">
+									<div class="justifyleft" style="width:100%">Fut.Entropy Walk <span class="helpicon">?<span class="helptext">
+										Alpha-generating process. Src: 0 = sine wave (periodic, uses the Fut.Entropy Wave fields), 1 = mean-reverting random walk (Ornstein-Uhlenbeck): each generated token, alpha drifts a fraction Theta back toward the baseline Alpha and is jolted by a random shock scaled by Vol. Theta 0 never returns to baseline; Vol. 0 keeps alpha constant. The alpha path is printed to the server console after each generation.</span></span></div>
+									<div style="display:flex;">
+										<div class="settinglabel settingcell">
+											<div title="Alpha Source (0 = Sine, 1 = Random Walk)" class="justifyleft" style="width:100%">Src</div>
+											<div class="justifyleft" style="width:100%">
+											<input title="Alpha-generating process (0 = sine wave, 1 = mean-reverting random walk)" class="settinglabel miniinput" type="text" inputmode="numeric" placeholder="0" value="0" id="fe_alpha_process"></div>
+										</div>
+										<div class="settinglabel settingcell">
+											<div title="Mean-Reversion Rate" class="justifyleft" style="width:100%">Theta</div>
+											<div class="justifyleft" style="width:100%">
+											<input title="Mean-reversion rate: fraction of the pull back to baseline alpha per token (0 = never return, 1 = snap back)" class="settinglabel miniinput" type="text" inputmode="decimal" placeholder="0.0" value="0.0" id="fe_ou_theta"></div>
+										</div>
+										<div class="settinglabel settingcell">
+											<div title="Volatility" class="justifyleft" style="width:100%">Vol.</div>
+											<div class="justifyleft" style="width:100%">
+											<input title="Volatility: size of the random jolt applied to alpha each token (0 = constant alpha)" class="settinglabel miniinput" type="text" inputmode="decimal" placeholder="0.0" value="0.0" id="fe_ou_sigma"></div>
 										</div>
 									</div>
 								</div>

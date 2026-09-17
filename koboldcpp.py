@@ -426,7 +426,10 @@ class generation_inputs(ctypes.Structure):
                 ("fe_entropy_threshold", ctypes.c_float),
                 ("fe_rel_prob_threshold", ctypes.c_float),
                 ("fe_alpha_min", ctypes.c_float),
-                ("fe_alpha_max", ctypes.c_float)]
+                ("fe_alpha_max", ctypes.c_float),
+                ("fe_alpha_process", ctypes.c_int32),
+                ("fe_ou_theta", ctypes.c_float),
+                ("fe_ou_sigma", ctypes.c_float)]
 
 class generation_outputs(ctypes.Structure):
     _fields_ = [("status", ctypes.c_int),
@@ -2277,6 +2280,9 @@ def generate(genparams, stream_flag=False):
     fe_rel_prob_threshold = tryparsefloat(genparams.get('future_entropy_rel_prob_threshold', 0.0), 0.0)
     fe_alpha_min = tryparsefloat(genparams.get('future_entropy_alpha_min', -1.0), -1.0)
     fe_alpha_max = tryparsefloat(genparams.get('future_entropy_alpha_max', 1.0), 1.0)
+    fe_alpha_process = tryparseint(genparams.get('future_entropy_alpha_process', 0), 0)
+    fe_ou_theta = tryparsefloat(genparams.get('future_entropy_ou_theta', 0.0), 0.0)
+    fe_ou_sigma = tryparsefloat(genparams.get('future_entropy_ou_sigma', 0.0), 0.0)
     if adaptive_target>0 and min_p<=0 and top_p>=1.0: #adaptive p sampler requires a truncation sampler first, force a tiny min-p
         min_p = 0.002
     logit_biases = genparams.get('logit_bias', {})
@@ -2379,6 +2385,9 @@ def generate(genparams, stream_flag=False):
     inputs.fe_rel_prob_threshold = fe_rel_prob_threshold
     inputs.fe_alpha_min = fe_alpha_min
     inputs.fe_alpha_max = fe_alpha_max
+    inputs.fe_alpha_process = fe_alpha_process
+    inputs.fe_ou_theta = fe_ou_theta
+    inputs.fe_ou_sigma = fe_ou_sigma
     if mirostat in (1, 2):
         inputs.mirostat = mirostat
         inputs.mirostat_tau = mirostat_tau

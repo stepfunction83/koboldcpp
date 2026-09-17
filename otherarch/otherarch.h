@@ -66,6 +66,18 @@ struct kcpp_params {
     float   fe_rel_prob_threshold = 0.0f; // lookahead only for candidates >= this fraction of top probability (0 = all)
     float   fe_alpha_min         = -1.0f; // lower bound for wave-modulated alpha (0/0 pair = unset, use [-1,1])
     float   fe_alpha_max         = 1.0f;  // upper bound for wave-modulated alpha
+    int32_t fe_alpha_process     = 0;     // alpha-generating process: 0 = sine wave, 1 = Ornstein-Uhlenbeck random walk
+    float   fe_ou_theta          = 0.0f;  // OU mean-reversion rate toward baseline alpha (per token)
+    float   fe_ou_sigma          = 0.0f;  // OU volatility (per-token shock stddev)
+
+    // per-step future-entropy history, collected during generation and rendered as a
+    // braille alpha-path graph + entropy statistics table when the generation completes
+    std::vector<float> fe_hist_alpha;      // effective (clamped, wave-modulated) alpha per step
+    std::vector<float> fe_hist_entropy;    // normalized candidate-pool entropy per step
+    int32_t fe_skipped_steps   = 0;        // steps where the lookahead was skipped (low entropy)
+    int64_t fe_lookaheads_total = 0;       // total lookahead forward passes across the generation
+    float   fe_ou_value          = 0.0f;  // current OU process state, advanced once per sampled token
+    bool    fe_ou_started        = false; // whether the OU state has been seeded with the baseline alpha
 
     std::string model_filename       = ""; // model path
     std::string prompt               = "";

@@ -30,6 +30,10 @@
 #include <deque>
 #include <memory>
 #include <thread>
+#ifndef _WIN32
+#include <unistd.h>
+#include <sys/ioctl.h>
+#endif
 
 #include "utils.h"
 #include "llmutils.h"
@@ -2381,9 +2385,11 @@ static float future_entropy_normalized(const float * logits, const int n_vocab, 
 }
 
 // Applies future-entropy score modulation to the (already truncated) candidate pool, restricting
-// selection to the top fe_top_n candidates. Returns false if KV rewinding failed, in which case
-// the sampler must be disabled (candidates are left untouched by a failed call).
-static bool sample_future_entropy(llama_token_data_array * candidates_p, const int n_vocab, const int fe_pos, const bool use_mrope, const int fe_step)
+// selection to the top fe_top_n candidates. Alpha beyond 1 does not invert the probability term:
+// instead the preference for high-Hhat candidates sharpens as s(w) ∝ Hhat(w)^alpha. Returns false
+// if KV rewinding failed, in which case the sampler must be disabled (candidates are left
+// untouched by a failed call).
+static bool sample_future_entropy(llama_token_data_array * candidates_p, const int n_vocab, const int fe_pos, const bool use_mrope, const int fe_step, std::mt19937 & rng)
 {
     const int top_n = kcpp_data->fe_top_n;
     int fe_lookaheads = 0;
@@ -2392,25 +2398,54 @@ static bool sample_future_entropy(llama_token_data_array * candidates_p, const i
     // normalized probabilities over the current pool (also sorts descending)
     sample_softmax(candidates_p);
 
-    // efficiency: skip lookahead on low-entropy steps - the next token is extremely likely to be
-    // the top candidate anyway, so there's no point wasting compute on entropy evaluation
-    if (kcpp_data->fe_entropy_threshold > 0.0f && candidates_p->size > 1) {
+    // normalized pool entropy: drives the low-entropy skip optimization below, and is
+    // recorded every step to feed the post-generation entropy statistics table
+    float hnorm = 0.0f;
+    if (candidates_p->size > 1) {
         double H = 0.0;
         for (size_t i = 0; i < candidates_p->size; ++i) {
             double p = candidates_p->data[i].p;
             if (p > 0.0) H += -p * log(p);
         }
-        float hnorm = (float)(H / log((double)candidates_p->size));
-        if (hnorm < kcpp_data->fe_entropy_threshold) { if (debugmode >= 1) printf("\n[FE] skipped: normalized entropy %.4f < threshold %.4f", hnorm, kcpp_data->fe_entropy_threshold); return true; }
+        hnorm = (float)(H / log((double)candidates_p->size));
     }
 
-    // alpha, optionally modulated by a sine wave (rhythmic decoding)
-    float alpha = kcpp_data->fe_alpha;
-    if (kcpp_data->fe_wave_period > 0.0f && kcpp_data->fe_wave_amplitude != 0.0f)
-        alpha += kcpp_data->fe_wave_amplitude * sinf((2.0f * (float)M_PI / kcpp_data->fe_wave_period) * (float)fe_step + kcpp_data->fe_wave_phase);
+    // alpha-generating process: sine wave (periodic) or Ornstein-Uhlenbeck (mean-reverting random walk)
+    float alpha = 0.0f;
+    if (kcpp_data->fe_alpha_process == 1)
+    {
+        // one OU step per sampled token: alpha_t = alpha_{t-1} + theta * (mu - alpha_{t-1}) + sigma * N(0,1),
+        // seeded at mu (the user's baseline alpha) on the first step
+        if (!kcpp_data->fe_ou_started) {
+            kcpp_data->fe_ou_value = kcpp_data->fe_alpha;
+            kcpp_data->fe_ou_started = true;
+        } else {
+            std::normal_distribution<float> fe_nd(0.0f, 1.0f);
+            kcpp_data->fe_ou_value += kcpp_data->fe_ou_theta * (kcpp_data->fe_alpha - kcpp_data->fe_ou_value) + kcpp_data->fe_ou_sigma * fe_nd(rng);
+        }
+        alpha = kcpp_data->fe_ou_value;
+    }
+    else {
+        alpha = kcpp_data->fe_alpha;
+        if (kcpp_data->fe_wave_period > 0.0f && kcpp_data->fe_wave_amplitude != 0.0f)
+            alpha += kcpp_data->fe_wave_amplitude * sinf((2.0f * (float)M_PI / kcpp_data->fe_wave_period) * (float)fe_step + kcpp_data->fe_wave_phase);
+    }
     alpha = std::min(kcpp_data->fe_alpha_max, std::max(kcpp_data->fe_alpha_min, alpha));
-    const float p_exp = 1.0f - fmaxf(0.0f, alpha);
-    const float h_exp = 1.0f - fmaxf(0.0f, -alpha);
+
+    // efficiency: skip lookahead on low-entropy steps - the next token is extremely likely to be
+    // the top candidate anyway, so there's no point wasting compute on entropy evaluation
+    if (kcpp_data->fe_entropy_threshold > 0.0f && candidates_p->size > 1 && hnorm < kcpp_data->fe_entropy_threshold) {
+        kcpp_data->fe_hist_alpha.push_back(alpha);
+        kcpp_data->fe_hist_entropy.push_back(hnorm);
+        kcpp_data->fe_skipped_steps += 1;
+        if (debugmode >= 1) printf("\n[FE] skipped: normalized entropy %.4f < threshold %.4f", hnorm, kcpp_data->fe_entropy_threshold);
+        return true;
+    }
+    // exponents never invert: past alpha=1 the probability exponent floors at 0 and the entropy
+    // exponent grows past 1, so s(w) ∝ Hhat(w)^alpha - a stronger preference for open futures,
+    // without turning probability into an actively penalized term
+    const float p_exp = std::max(0.0f, 1.0f - alpha);
+    const float h_exp = 1.0f + std::max(0.0f, alpha - 1.0f);
 
     const size_t m = std::min((size_t)top_n, candidates_p->size);
     const float pmax = candidates_p->data[0].p;
@@ -2430,16 +2465,170 @@ static bool sample_future_entropy(llama_token_data_array * candidates_p, const i
     }
 
     // score in log space: log s(w) = p_exp*log p(w) + h_exp*log Hhat(w)
-    // candidates without a lookahead keep their normalized log probability for comparability
+    // candidates skipped by the relative-probability filter are scored with the same probability
+    // exponent and an unknown future anchored neutrally to the evaluated candidates' mean entropy
+    // term, so both groups stay comparable regardless of alpha
+    double h_ref = 0.0; int h_ref_n = 0;
+    for (size_t i = 0; i < m; ++i) if (hhat[i] >= 0.0f) { h_ref += h_exp * logf(hhat[i]); h_ref_n++; }
+    if (h_ref_n > 0) h_ref /= h_ref_n;
     for (size_t i = 0; i < m; ++i) {
         const float p = candidates_p->data[i].p;
         float lp = logf(p > 1e-30f ? p : 1e-30f);
-        candidates_p->data[i].logit = (hhat[i] < 0.0f) ? lp : (p_exp * lp + h_exp * logf(hhat[i]));
+        candidates_p->data[i].logit = (hhat[i] < 0.0f) ? (p_exp * lp + (float)h_ref) : (p_exp * lp + h_exp * logf(hhat[i]));
     }
     candidates_p->size = m; // selection is restricted to the top-n candidates
     candidates_p->sorted = false;
+    kcpp_data->fe_hist_alpha.push_back(alpha);
+    kcpp_data->fe_hist_entropy.push_back(hnorm);
+    kcpp_data->fe_lookaheads_total += fe_lookaheads;
     if (debugmode >= 1) printf("\n[FE] step %d: alpha %.3f, pool %zu -> %zu lookaheads", fe_step, alpha, m, (size_t)fe_lookaheads);
     return true;
+}
+
+// Appends a unicode codepoint to a UTF-8 string
+static void fe_append_utf8(std::string & out, uint32_t cp)
+{
+    if (cp < 0x80) { out += (char)cp; }
+    else if (cp < 0x800) { out += (char)(0xC0 | (cp >> 6)); out += (char)(0x80 | (cp & 0x3F)); }
+    else { out += (char)(0xE0 | (cp >> 12)); out += (char)(0x80 | ((cp >> 6) & 0x3F)); out += (char)(0x80 | (cp & 0x3F)); }
+}
+
+// Console width for the post-generation visualization (defaults to 80 columns)
+static int fe_terminal_width()
+{
+#ifndef _WIN32
+    struct winsize ws;
+    if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws) == 0 && ws.ws_col > 40) return (int)ws.ws_col;
+#endif
+    return 80;
+}
+
+// Renders the future-entropy run to the terminal once the generation loop finishes:
+// an nvtop-style braille dot-graph of the alpha path across the generation (y-axis centered on
+// zero, so deviation above/below zero is the primary reading), followed by a statistics table
+// over the per-step normalized entropies. Consumes (clears) the recorded history.
+static void print_future_entropy_visualization()
+{
+    std::vector<float> hist_alpha, hist_entropy;
+    hist_alpha.swap(kcpp_data->fe_hist_alpha);
+    hist_entropy.swap(kcpp_data->fe_hist_entropy);
+    const int skipped = kcpp_data->fe_skipped_steps;
+    const long long lookaheads = kcpp_data->fe_lookaheads_total;
+    kcpp_data->fe_skipped_steps = 0;
+    kcpp_data->fe_lookaheads_total = 0;
+    const int n = (int)hist_alpha.size();
+    if (n == 0) return;
+
+    // ================================ braille alpha-path graph ================================
+    const int hrows = 5; // braille cell rows (4 dot-rows each)
+    const int hdots = hrows * 4;
+    static const uint8_t feat[4][2] = {{0x01, 0x08}, {0x02, 0x10}, {0x04, 0x20}, {0x40, 0x80}}; // dot bits by (row%4, col%2)
+    int gwidth = std::min(fe_terminal_width() - 10, 100); // graph width in chars
+    if (gwidth < 30) gwidth = 30;
+    const int gcells = gwidth * 2; // dot columns
+
+    // bucket-average the alpha path when there are more steps than dot columns
+    std::vector<float> plot;
+    if (n > gcells) {
+        plot.reserve(gcells);
+        for (int c = 0; c < gcells; ++c) {
+            int lo = (int)((long long)c * n / gcells), hi = (int)((long long)(c + 1) * n / gcells);
+            if (hi <= lo) hi = lo + 1;
+            double s = 0.0; for (int i = lo; i < hi; ++i) s += hist_alpha[i];
+            plot.push_back((float)(s / (hi - lo)));
+        }
+    } else plot = hist_alpha;
+    const int np = (int)plot.size();
+
+    float amax = 1e-4f, amin = hist_alpha[0]; double amax_acc = 0.0;
+    for (float v : hist_alpha) { amax = std::max(amax, std::fabs(v)); amin = std::min(amin, v); amax_acc += v; }
+    const float apos_max = std::max(amax, 0.05f); // symmetric y-scale so zero sits at the graph center; floor keeps labels sane when alpha is exactly 0
+    auto ydot = [&](float a) -> int { return (int)lroundf((float)(hdots - 1) * (apos_max - a) / (2.0f * apos_max)); };
+
+    std::vector<uint8_t> grid(hdots * gcells, 0); // each entry is one dot
+    // dotted zero line: two-dot dashes every few columns
+    const int zy = ydot(0.0f);
+    for (int c = 0; c < gcells; c += 6) {
+        grid[zy * gcells + c] = 1;
+        if (c + 1 < gcells) grid[zy * gcells + c + 1] = 1;
+    }
+    // alpha path: bresenham between successive samples
+    int px = -1, py = 0;
+    for (int i = 0; i < np; ++i) {
+        int x = (np == 1) ? 0 : (int)lroundf((float)i * (gcells - 1) / (np - 1));
+        int y = ydot(plot[i]);
+        if (px < 0) { grid[y * gcells + x] = 1; px = x; py = y; continue; }
+        int dx = std::abs(x - px), dy = std::abs(y - py);
+        int sx = (x >= px) ? 1 : -1, sy = (y >= py) ? 1 : -1, err = dx - dy;
+        while (true) {
+            grid[py * gcells + px] = 1;
+            if (px == x && py == y) break;
+            int e2 = 2 * err;
+            if (e2 > -dy) { err -= dy; px += sx; }
+            if (e2 < dx) { err += dx; py += sy; }
+        }
+    }
+
+    printf("\n Future-Entropy: alpha path across generation (N=%d steps, y-range +/-%.2f)\n", n, (double)apos_max);
+    for (int r = 0; r < hrows; ++r) {
+        char lbuf[16] = {0}; const char * lab = "      ";
+        if (r == 0) snprintf(lbuf, sizeof lbuf, "%6.2f", (double)apos_max);
+        else if (zy >= r * 4 && zy < (r + 1) * 4) snprintf(lbuf, sizeof lbuf, "%6.2f", 0.0);
+        else if (r == hrows - 1) snprintf(lbuf, sizeof lbuf, "%6.2f", (double)(-apos_max));
+        if (lbuf[0]) lab = lbuf;
+        std::string line; line.reserve(gwidth * 3);
+        for (int c = 0; c < gwidth; ++c) {
+            uint32_t bits = 0;
+            for (int rr = 0; rr < 4; ++rr) for (int cc = 0; cc < 2; ++cc) if (grid[(r * 4 + rr) * gcells + (c * 2 + cc)]) bits |= feat[rr][cc];
+            fe_append_utf8(line, 0x2800 + bits);
+        }
+        printf("%s \xe2\x94\xa4 %s\n", lab, line.c_str()); // ┤
+    }
+    {
+        std::string dashes; for (int c = 0; c < gwidth; ++c) fe_append_utf8(dashes, 0x2500); // ─
+        char xbuf[48]; int rightw = snprintf(xbuf, sizeof xbuf, "%d", n - 1);
+        printf("        \xe2\x94\x94%s", dashes.c_str()); // └
+        printf("\n         0%*s%s\n", std::max(0, gwidth - 1 - rightw), "", xbuf);
+    }
+
+    // ================================ entropy statistics table ================================
+    std::vector<float> esort = hist_entropy;
+    std::sort(esort.begin(), esort.end());
+    const int ne = (int)esort.size();
+    double esum = 0.0, esq = 0.0;
+    for (float v : esort) { esum += v; esq += (double)v * v; }
+    const double emean = ne ? esum / ne : 0.0;
+    const double emedian = ne ? (ne % 2 ? esort[ne / 2] : (esort[ne / 2 - 1] + esort[ne / 2]) * 0.5) : 0.0;
+    const double estd = ne ? sqrt(std::max(0.0, esq / ne - emean * emean)) : 0.0;
+
+    char v1[32], v2[32];
+    auto trow = [&](const char * k1, const char * v1s, const char * k2, const char * v2s) {
+        printf("\xe2\x94\x82 %-16s %-9s\xe2\x94\x82 %-16s %-9s\xe2\x94\x82\n", k1, v1s, k2, v2s); // │
+    };
+    printf("\xe2\x94\x8c"); // ┌
+    for (int c = 0; c < 26; ++c) printf("\xe2\x94\x80");
+    printf("\xe2\x94\xac");
+    for (int c = 0; c < 26; ++c) printf("\xe2\x94\x80");
+    printf("\xe2\x94\x90\n"); // ┐
+    printf("\xe2\x94\x82 %-51s \xe2\x94\x82\n", "Future-Entropy generation stats");
+    printf("\xe2\x94\x9c"); // ├
+    for (int c = 0; c < 26; ++c) printf("\xe2\x94\x80");
+    printf("\xe2\x94\xbc");
+    for (int c = 0; c < 26; ++c) printf("\xe2\x94\x80");
+    printf("\xe2\x94\xa4\n"); // ┤
+    snprintf(v1, sizeof v1, "%d", n); snprintf(v2, sizeof v2, "%d", skipped); trow("steps evaluated", v1, "steps skipped", v2);
+    snprintf(v1, sizeof v1, "%lld", lookaheads); snprintf(v2, sizeof v2, "%.2f", n ? (double)lookaheads / n : 0.0); trow("lookahead passes", v1, "lookaheads/step", v2);
+    snprintf(v1, sizeof v1, "%.4f", emean); snprintf(v2, sizeof v2, "%.4f", emedian); trow("entropy mean", v1, "entropy median", v2);
+    snprintf(v1, sizeof v1, "%.4f", ne ? (double)esort[0] : 0.0); snprintf(v2, sizeof v2, "%.4f", ne ? (double)esort[ne - 1] : 0.0); trow("entropy min", v1, "entropy max", v2);
+    snprintf(v1, sizeof v1, "%.4f", estd); snprintf(v2, sizeof v2, "%.4f", (double)kcpp_data->fe_entropy_threshold); trow("entropy std-dev", v1, "skip threshold", v2);
+    snprintf(v1, sizeof v1, "%.2f", (double)amin); snprintf(v2, sizeof v2, "%.2f", (double)amax); trow("alpha min", v1, "alpha max", v2);
+    snprintf(v1, sizeof v1, "%.2f", amax_acc / n); trow("alpha mean", v1, "", "");
+    printf("\xe2\x94\x94"); // └
+    for (int c = 0; c < 26; ++c) printf("\xe2\x94\x80");
+    printf("\xe2\x94\xb4");
+    for (int c = 0; c < 26; ++c) printf("\xe2\x94\x80");
+    printf("\xe2\x94\x98\n"); // ┘
+    fflush(stdout);
 }
 
 int SampleLogits(const float * logits, int n_ctx, int n_vocab, int rep_pen_range, float rep_pen, float rep_pen_slope, float presence_penalty, float top_k, float top_a, float top_p, float min_p, float typical_p, float tfs, float nsigma, float temp, std::mt19937 & rng,
@@ -2567,7 +2756,7 @@ int fe_pos, int fe_step)
         // before xtc. Skipped under grammar constraints (candidate set is already masked).
         if (kcpp_data->fe_top_n >= 2 && !use_grammar)
         {
-            if (!sample_future_entropy(&candidates_p, n_vocab, fe_pos, use_mrope, fe_step))
+            if (!sample_future_entropy(&candidates_p, n_vocab, fe_pos, use_mrope, fe_step, rng))
             {
                 kcpp_data->fe_top_n = 0; // KV cache cannot be rewound, disable for this request
                 printf("\n(Future Entropy sampler disabled: KV cache does not support rewinding.)\n");
@@ -6039,6 +6228,9 @@ generation_outputs gpttype_generate(const generation_inputs inputs)
     if (fe_amin > fe_amax) std::swap(fe_amin, fe_amax);
     kcpp_data->fe_alpha_min = fe_amin;
     kcpp_data->fe_alpha_max = fe_amax;
+    kcpp_data->fe_alpha_process = (inputs.fe_alpha_process == 1) ? 1 : 0;
+    kcpp_data->fe_ou_theta = std::min(1.0f, std::max(0.0f, inputs.fe_ou_theta));
+    kcpp_data->fe_ou_sigma = std::min(10.0f, std::max(0.0f, inputs.fe_ou_sigma));
     if (kcpp_data->fe_top_n >= 2)
     {
         if (file_format != FileFormat::GGUF_GENERIC || draft_ctx != nullptr)
@@ -6047,6 +6239,12 @@ generation_outputs gpttype_generate(const generation_inputs inputs)
             kcpp_data->fe_top_n = 0;
         }
     }
+    kcpp_data->fe_hist_alpha.clear();
+    kcpp_data->fe_hist_entropy.clear();
+    kcpp_data->fe_skipped_steps = 0;
+    kcpp_data->fe_lookaheads_total = 0;
+    kcpp_data->fe_ou_value = 0.0f;
+    kcpp_data->fe_ou_started = false;
 
     adaptive_p_weighted_sum = 0;
     adaptive_p_total_weight = 0;
@@ -7645,6 +7843,9 @@ generation_outputs gpttype_generate(const generation_inputs inputs)
     concat_output_reader_copy_res = concat_output;
     concat_output_mtx.unlock();
     output.text = concat_output_reader_copy_res.c_str();
+    // render the future-entropy alpha-path graph + entropy stats table once generation finishes
+    if (!kcpp_data->fe_hist_alpha.empty())
+        print_future_entropy_visualization();
     generation_finished = true;
     return output;
 }
