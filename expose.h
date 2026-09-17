@@ -151,6 +151,15 @@ struct generation_inputs
     const int banned_tokens_len = 0;
     const char ** banned_tokens = nullptr;
     const int reasoning_budget = -1;
+
+    // Future entropy sampler (see countbayesie.com, "Making LLMs Better at Creative Writing using Entropy")
+    const int fe_top_n = 0;                      // 0 disables the sampler; otherwise number of lookahead candidates (also top-n size for entropy normalization)
+    const float fe_alpha = 0.0f;                 // baseline alpha of the probability/entropy crossfader, in [-1, 1]
+    const float fe_wave_amplitude = 0.0f;        // amplitude of the sine wave modulating alpha
+    const float fe_wave_period = 0.0f;           // period (in tokens) of the alpha sine wave; 0 = no wave (constant alpha)
+    const float fe_wave_phase = 0.0f;            // phase offset (radians) of the alpha sine wave
+    const float fe_entropy_threshold = 0.0f;     // skip lookahead when the current normalized entropy is below this value (deterministic step); 0 = never skip
+    const float fe_rel_prob_threshold = 0.0f;    // only compute lookahead for candidates whose probability is at least this fraction of the top candidate's; 0 = all candidates
 };
 struct generation_outputs
 {

@@ -2332,10 +2332,120 @@ static int apply_reasoning_budget(int id, const std::vector<int> & start_think, 
     return id;
 }
 
+
+// ================================================================================================
+// Future Entropy sampler ("future-entropy" decoding).
+// Each candidate token w is scored using the normalized Shannon entropy of the NEXT token
+// distribution that w would lead into, taken over its top-n tokens:
+//      s(w) = p(w)^a * Hhat(w)^b,   a = 1 - max(0, alpha),  b = 1 - max(0, -alpha)
+// where alpha in [-1, 1] crossfades between the original probabilities (alpha = -1, behaves like
+// conventional sampling) and pure future-optionality (alpha = +1, only entropy matters).
+// alpha can optionally be modulated by a sine wave across the generation (rhythmic decoding),
+// letting the text alternate between predictable and open-ended passages.
+// The lookahead requires one forward pass per candidate token; the resulting KV entries are
+// rewound after each evaluation so the real context stays clean.
+// Efficiency options: lookahead is skipped entirely on low-entropy steps (the outcome is nearly
+// deterministic anyway), and candidates whose probability falls below a fraction of the top
+// candidate's probability are not given a lookahead pass.
+// ================================================================================================
+
+// Normalized Shannon entropy (in [0, 1]) of the top-n subset of the given logits.
+static float future_entropy_normalized(const float * logits, const int n_vocab, const int n_top)
+{
+    // select the n_top largest logits using a small ascending-sorted list (n_top is tiny)
+    const int n = std::min(n_top, n_vocab);
+    if (n < 2) return 0.0f;
+    thread_local static std::vector<float> best;
+    best.assign(n, -INFINITY);
+    for (int i = 0; i < n_vocab; ++i) {
+        const float v = logits[i];
+        if (v > best[0]) {
+            int j = 0;
+            while (j < n - 1 && v > best[j + 1]) { best[j] = best[j + 1]; ++j; }
+            best[j] = v;
+        }
+    }
+    // softmax restricted to the top-n set, then entropy normalized by log(n)
+    const float m = best[n - 1];
+    double sum = 0.0, H = 0.0;
+    for (int i = 0; i < n; ++i) sum += exp((double)best[i] - (double)m);
+    if (sum <= 0.0 || !std::isfinite(sum)) return 1e-8f;
+    for (int i = 0; i < n; ++i) {
+        double p = exp((double)best[i] - (double)m) / sum;
+        if (p > 0.0) H += -p * log(p);
+    }
+    float hhat = (float)(H / log((double)n));
+    if (hhat < 1e-8f) hhat = 1e-8f; // floor so log(hhat) below stays finite
+    return hhat;
+}
+
+// Applies future-entropy score modulation to the (already truncated) candidate pool, restricting
+// selection to the top fe_top_n candidates. Returns false if KV rewinding failed, in which case
+// the sampler must be disabled (candidates are left untouched by a failed call).
+static bool sample_future_entropy(llama_token_data_array * candidates_p, const int n_vocab, const int fe_pos, const bool use_mrope, const int fe_step)
+{
+    const int top_n = kcpp_data->fe_top_n;
+    int fe_lookaheads = 0;
+    if (top_n < 2 || candidates_p->size < 2) return true;
+
+    // normalized probabilities over the current pool (also sorts descending)
+    sample_softmax(candidates_p);
+
+    // efficiency: skip lookahead on low-entropy steps - the next token is extremely likely to be
+    // the top candidate anyway, so there's no point wasting compute on entropy evaluation
+    if (kcpp_data->fe_entropy_threshold > 0.0f && candidates_p->size > 1) {
+        double H = 0.0;
+        for (size_t i = 0; i < candidates_p->size; ++i) {
+            double p = candidates_p->data[i].p;
+            if (p > 0.0) H += -p * log(p);
+        }
+        float hnorm = (float)(H / log((double)candidates_p->size));
+        if (hnorm < kcpp_data->fe_entropy_threshold) { if (debugmode >= 1) printf("\n[FE] skipped: normalized entropy %.4f < threshold %.4f", hnorm, kcpp_data->fe_entropy_threshold); return true; }
+    }
+
+    // alpha, optionally modulated by a sine wave (rhythmic decoding)
+    float alpha = kcpp_data->fe_alpha;
+    if (kcpp_data->fe_wave_period > 0.0f && kcpp_data->fe_wave_amplitude != 0.0f)
+        alpha += kcpp_data->fe_wave_amplitude * sinf((2.0f * (float)M_PI / kcpp_data->fe_wave_period) * (float)fe_step + kcpp_data->fe_wave_phase);
+    alpha = std::min(1.0f, std::max(-1.0f, alpha));
+    const float p_exp = 1.0f - fmaxf(0.0f, alpha);
+    const float h_exp = 1.0f - fmaxf(0.0f, -alpha);
+
+    const size_t m = std::min((size_t)top_n, candidates_p->size);
+    const float pmax = candidates_p->data[0].p;
+    thread_local static std::vector<float> hhat; // -1 = lookahead skipped (below relative probability threshold)
+    hhat.assign(m, -1.0f);
+    llama_memory_t mem = llama_get_memory(llama_ctx_v4);
+    for (size_t i = 0; i < m; ++i) {
+        if (kcpp_data->fe_rel_prob_threshold > 0.0f && candidates_p->data[i].p < kcpp_data->fe_rel_prob_threshold * pmax)
+            continue; // efficiency: unlikely candidate, not worth a lookahead pass
+        fe_lookaheads++;
+        std::vector<llama_token> fe_tok {candidates_p->data[i].id};
+        kcpp_embd_batch fe_batch = kcpp_embd_batch(fe_tok, fe_pos, use_mrope, true);
+        bool ok = (llama_decode(llama_ctx_v4, fe_batch.batch) == 0);
+        if (ok) hhat[i] = future_entropy_normalized(llama_get_logits(llama_ctx_v4), n_vocab, top_n);
+        if (!llama_memory_seq_rm(mem, 0, fe_pos, -1)) return false; // cannot rewind KV, disable the sampler
+        if (!ok) return false;
+    }
+
+    // score in log space: log s(w) = p_exp*log p(w) + h_exp*log Hhat(w)
+    // candidates without a lookahead keep their normalized log probability for comparability
+    for (size_t i = 0; i < m; ++i) {
+        const float p = candidates_p->data[i].p;
+        float lp = logf(p > 1e-30f ? p : 1e-30f);
+        candidates_p->data[i].logit = (hhat[i] < 0.0f) ? lp : (p_exp * lp + h_exp * logf(hhat[i]));
+    }
+    candidates_p->size = m; // selection is restricted to the top-n candidates
+    candidates_p->sorted = false;
+    if (debugmode >= 1) printf("\n[FE] step %d: alpha %.3f, pool %zu -> %zu lookaheads", fe_step, alpha, m, (size_t)fe_lookaheads);
+    return true;
+}
+
 int SampleLogits(const float * logits, int n_ctx, int n_vocab, int rep_pen_range, float rep_pen, float rep_pen_slope, float presence_penalty, float top_k, float top_a, float top_p, float min_p, float typical_p, float tfs, float nsigma, float temp, std::mt19937 & rng,
 int mirostat, float mirostat_tau, float mirostat_eta, float dry_multiplier, float dry_base, int dry_allowed_length, int dry_penalty_last_n, float xtc_threshold, float xtc_probability,
 const std::vector<samplers> & sampler_order, llama_grammar * grammar, float dynatemp_range, float dynatemp_exponent, float smoothing_factor, float smoothing_curve, float adaptive_target, float adaptive_decay,
-const std::vector<int> & think_start_seq, const std::vector<int> & think_end_seq, std::vector<int> & think_end_phrase_toks, int reasoning_budget)
+const std::vector<int> & think_start_seq, const std::vector<int> & think_end_seq, std::vector<int> & think_end_phrase_toks, int reasoning_budget,
+int fe_pos, int fe_step)
 {
     // printf("SampleLogits called with: n_ctx=%d, n_vocab=%d, rep_pen_range=%d, rep_pen=%f, rep_pen_slope=%f, presence_penalty=%f, top_k=%f, top_a=%f, top_p=%f, min_p=%f, typical_p=%f, tfs=%f, nsigma=%f, temp=%f, mirostat=%d, mirostat_tau=%f, mirostat_eta=%f, dry_multiplier=%f, dry_base=%f, dry_allowed_length=%d, dry_penalty_last_n=%d, xtc_threshold=%f, xtc_probability=%f, sampler_order_size=%zu, dynatemp_range=%f, dynatemp_exponent=%f, smoothing_factor=%f\n",
     // n_ctx, n_vocab, rep_pen_range, rep_pen, rep_pen_slope, presence_penalty, top_k, top_a, top_p, min_p, typical_p, tfs, nsigma, temp, mirostat, mirostat_tau, mirostat_eta, dry_multiplier, dry_base, dry_allowed_length, dry_penalty_last_n, xtc_threshold, xtc_probability, sampler_order.size(), dynatemp_range, dynatemp_exponent, smoothing_factor);
@@ -2450,6 +2560,16 @@ const std::vector<int> & think_start_seq, const std::vector<int> & think_end_seq
                 default:
                     printf("\nSampleLogits: Unknown Sampler : %d",sampler_order[i]);
                     break;
+            }
+        }
+        // Future entropy sampler: after the truncation chain (which defines the candidate pool),
+        // before xtc. Skipped under grammar constraints (candidate set is already masked).
+        if (kcpp_data->fe_top_n >= 2 && !use_grammar)
+        {
+            if (!sample_future_entropy(&candidates_p, n_vocab, fe_pos, use_mrope, fe_step))
+            {
+                kcpp_data->fe_top_n = 0; // KV cache cannot be rewound, disable for this request
+                printf("\n(Future Entropy sampler disabled: KV cache does not support rewinding.)\n");
             }
         }
         //xtc always last
@@ -5904,6 +6024,23 @@ generation_outputs gpttype_generate(const generation_inputs inputs)
     kcpp_data->adaptive_decay = inputs.adaptive_decay;
     kcpp_data->reasoning_budget = inputs.reasoning_budget;
 
+    // future entropy sampler params
+    kcpp_data->fe_top_n = (inputs.fe_top_n < 0) ? 0 : std::min(inputs.fe_top_n, 64);
+    kcpp_data->fe_alpha = std::min(1.0f, std::max(-1.0f, inputs.fe_alpha));
+    kcpp_data->fe_wave_amplitude = std::min(2.0f, std::max(0.0f, inputs.fe_wave_amplitude));
+    kcpp_data->fe_wave_period = std::max(0.0f, inputs.fe_wave_period);
+    kcpp_data->fe_wave_phase = inputs.fe_wave_phase;
+    kcpp_data->fe_entropy_threshold = std::min(1.0f, std::max(0.0f, inputs.fe_entropy_threshold));
+    kcpp_data->fe_rel_prob_threshold = std::min(1.0f, std::max(0.0f, inputs.fe_rel_prob_threshold));
+    if (kcpp_data->fe_top_n >= 2)
+    {
+        if (file_format != FileFormat::GGUF_GENERIC || draft_ctx != nullptr)
+        {
+            printf("\n(Note: Future Entropy sampler is only supported for GGUF models without a draft/speculative model. It has been disabled for this request.)");
+            kcpp_data->fe_top_n = 0;
+        }
+    }
+
     adaptive_p_weighted_sum = 0;
     adaptive_p_total_weight = 0;
     if(kcpp_data->adaptive_target > 0.0f && kcpp_data->adaptive_decay<1.0f)
@@ -7008,8 +7145,8 @@ generation_outputs gpttype_generate(const generation_inputs inputs)
                 kcpp_data->dry_multiplier, kcpp_data->dry_base,
                 kcpp_data->dry_allowed_length, kcpp_data->dry_penalty_last_n, kcpp_data->xtc_threshold, kcpp_data->xtc_probability,
                 sampler_order, grammar, dynatemp_range, dynatemp_exponent, smoothing_factor, smoothing_curve, adaptive_target, adaptive_decay,
-                thinking_start_sequence, thinking_end_sequence, thinking_end_phrase_toksleft, kcpp_data->reasoning_budget);
-
+                thinking_start_sequence, thinking_end_sequence, thinking_end_phrase_toksleft, kcpp_data->reasoning_budget,
+                n_past, (kcpp_data->n_predict - remaining_tokens));
                 if(draft_used)
                 {
                     if(logits_sampled < draft_results.drafted_amount)

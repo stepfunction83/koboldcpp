@@ -56,6 +56,15 @@ struct kcpp_params {
     float adaptive_decay      = 0.9f;
     int reasoning_budget       = 0; //if > 0, controls thinking budget
 
+    // future entropy sampler
+    int32_t fe_top_n             = 0;     // 0 = disabled; otherwise number of lookahead candidates
+    float   fe_alpha             = 0.0f;  // baseline alpha, [-1, 1]
+    float   fe_wave_amplitude    = 0.0f;  // sine wave amplitude for alpha modulation
+    float   fe_wave_period       = 0.0f;  // sine wave period in tokens (0 = no wave)
+    float   fe_wave_phase        = 0.0f;  // sine wave phase in radians
+    float   fe_entropy_threshold = 0.0f;  // skip lookahead below this normalized entropy (0 = never skip)
+    float   fe_rel_prob_threshold = 0.0f; // lookahead only for candidates >= this fraction of top probability (0 = all)
+
     std::string model_filename       = ""; // model path
     std::string prompt               = "";
     bool flash_attn                  = false; // flash attention

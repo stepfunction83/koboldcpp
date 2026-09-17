@@ -417,7 +417,14 @@ class generation_inputs(ctypes.Structure):
                 ("logit_biases", ctypes.POINTER(logit_bias)),
                 ("banned_tokens_len", ctypes.c_int),
                 ("banned_tokens", ctypes.POINTER(ctypes.c_char_p)),
-                ("reasoning_budget", ctypes.c_int)]
+                ("reasoning_budget", ctypes.c_int),
+                ("fe_top_n", ctypes.c_int),
+                ("fe_alpha", ctypes.c_float),
+                ("fe_wave_amplitude", ctypes.c_float),
+                ("fe_wave_period", ctypes.c_float),
+                ("fe_wave_phase", ctypes.c_float),
+                ("fe_entropy_threshold", ctypes.c_float),
+                ("fe_rel_prob_threshold", ctypes.c_float)]
 
 class generation_outputs(ctypes.Structure):
     _fields_ = [("status", ctypes.c_int),
@@ -2258,6 +2265,14 @@ def generate(genparams, stream_flag=False):
     adaptive_target = tryparsefloat(genparams.get('adaptive_target', -1.0),-1.0)
     adaptive_decay = tryparsefloat(genparams.get('adaptive_decay', 0.9),0.9)
     adaptive_decay = 0.01 if adaptive_decay < 0.01 else (0.99 if adaptive_decay > 0.99 else adaptive_decay)
+    # future entropy sampler
+    fe_top_n = tryparseint(genparams.get('future_entropy_top_n', 0), 0)
+    fe_alpha = tryparsefloat(genparams.get('future_entropy_alpha', 0.0), 0.0)
+    fe_wave_amplitude = tryparsefloat(genparams.get('future_entropy_wave_amplitude', 0.0), 0.0)
+    fe_wave_period = tryparsefloat(genparams.get('future_entropy_wave_period', 0.0), 0.0)
+    fe_wave_phase = tryparsefloat(genparams.get('future_entropy_wave_phase', 0.0), 0.0)
+    fe_entropy_threshold = tryparsefloat(genparams.get('future_entropy_entropy_threshold', 0.0), 0.0)
+    fe_rel_prob_threshold = tryparsefloat(genparams.get('future_entropy_rel_prob_threshold', 0.0), 0.0)
     if adaptive_target>0 and min_p<=0 and top_p>=1.0: #adaptive p sampler requires a truncation sampler first, force a tiny min-p
         min_p = 0.002
     logit_biases = genparams.get('logit_bias', {})
@@ -2351,6 +2366,13 @@ def generate(genparams, stream_flag=False):
     inputs.bypass_eos_token = bypass_eos_token
     inputs.tool_call_fix = tool_call_fix
     inputs.render_special = render_special
+    inputs.fe_top_n = fe_top_n
+    inputs.fe_alpha = fe_alpha
+    inputs.fe_wave_amplitude = fe_wave_amplitude
+    inputs.fe_wave_period = fe_wave_period
+    inputs.fe_wave_phase = fe_wave_phase
+    inputs.fe_entropy_threshold = fe_entropy_threshold
+    inputs.fe_rel_prob_threshold = fe_rel_prob_threshold
     if mirostat in (1, 2):
         inputs.mirostat = mirostat
         inputs.mirostat_tau = mirostat_tau
