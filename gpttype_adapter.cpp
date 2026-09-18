@@ -2410,25 +2410,29 @@ static bool sample_future_entropy(llama_token_data_array * candidates_p, const i
         hnorm = (float)(H / log((double)candidates_p->size));
     }
 
-    // alpha-generating process: sine wave (periodic) or Ornstein-Uhlenbeck (mean-reverting random walk)
-    float alpha = 0.0f;
-    if (kcpp_data->fe_alpha_process == 1)
-    {
+    // alpha-generating sources blended by fe_alpha_mix: 0 = sine wave only (periodic, the Fut.Entropy
+    // Wave fields), 1 = mean-reverting random walk (Ornstein-Uhlenbeck) only, in between = both are
+    // computed and linearly mixed (mix * walk + (1 - mix) * wave)
+    float alpha_sine = kcpp_data->fe_alpha;
+    if (kcpp_data->fe_wave_period > 0.0f && kcpp_data->fe_wave_amplitude != 0.0f)
+        alpha_sine += kcpp_data->fe_wave_amplitude * sinf((2.0f * (float)M_PI / kcpp_data->fe_wave_period) * (float)fe_step + kcpp_data->fe_wave_phase);
+    const float fe_mix = kcpp_data->fe_alpha_mix;
+    float alpha = alpha_sine;
+    if (fe_mix > 0.0f) {
         // one OU step per sampled token: alpha_t = alpha_{t-1} + theta * (mu - alpha_{t-1}) + sigma * N(0,1),
-        // seeded at mu (the user's baseline alpha) on the first step
+        // seeded at mu (the user's baseline alpha) on the first step; the walk only advances when the
+        // mix actually uses it, so pure-sine runs consume no extra rng draws
+        float alpha_ou = 0.0f;
         if (!kcpp_data->fe_ou_started) {
             kcpp_data->fe_ou_value = kcpp_data->fe_alpha;
             kcpp_data->fe_ou_started = true;
+            alpha_ou = kcpp_data->fe_ou_value;
         } else {
             std::normal_distribution<float> fe_nd(0.0f, 1.0f);
             kcpp_data->fe_ou_value += kcpp_data->fe_ou_theta * (kcpp_data->fe_alpha - kcpp_data->fe_ou_value) + kcpp_data->fe_ou_sigma * fe_nd(rng);
+            alpha_ou = kcpp_data->fe_ou_value;
         }
-        alpha = kcpp_data->fe_ou_value;
-    }
-    else {
-        alpha = kcpp_data->fe_alpha;
-        if (kcpp_data->fe_wave_period > 0.0f && kcpp_data->fe_wave_amplitude != 0.0f)
-            alpha += kcpp_data->fe_wave_amplitude * sinf((2.0f * (float)M_PI / kcpp_data->fe_wave_period) * (float)fe_step + kcpp_data->fe_wave_phase);
+        alpha = fe_mix * alpha_ou + (1.0f - fe_mix) * alpha_sine;
     }
     alpha = std::min(kcpp_data->fe_alpha_max, std::max(kcpp_data->fe_alpha_min, alpha));
 
@@ -6228,7 +6232,7 @@ generation_outputs gpttype_generate(const generation_inputs inputs)
     if (fe_amin > fe_amax) std::swap(fe_amin, fe_amax);
     kcpp_data->fe_alpha_min = fe_amin;
     kcpp_data->fe_alpha_max = fe_amax;
-    kcpp_data->fe_alpha_process = (inputs.fe_alpha_process == 1) ? 1 : 0;
+    kcpp_data->fe_alpha_mix = std::min(1.0f, std::max(0.0f, inputs.fe_alpha_mix));
     kcpp_data->fe_ou_theta = std::min(1.0f, std::max(0.0f, inputs.fe_ou_theta));
     kcpp_data->fe_ou_sigma = std::min(10.0f, std::max(0.0f, inputs.fe_ou_sigma));
     if (kcpp_data->fe_top_n >= 2)

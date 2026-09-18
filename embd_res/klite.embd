@@ -4650,7 +4650,7 @@ Current version indicated by LITEVER below.
 		fe_rel_prob_threshold: 0.0,
 		fe_alpha_min: -1.0,
 		fe_alpha_max: 1.0,
-		fe_alpha_process: 0.0,
+		fe_alpha_mix: 0.0,
 		fe_ou_theta: 0.0,
 		fe_ou_sigma: 0.0,
 		adaptivep_target: -1.0,
@@ -16927,7 +16927,7 @@ Current version indicated by LITEVER below.
 		document.getElementById("fe_rel_prob_threshold").value = localsettings.fe_rel_prob_threshold;
 		document.getElementById("fe_alpha_min").value = localsettings.fe_alpha_min;
 		document.getElementById("fe_alpha_max").value = localsettings.fe_alpha_max;
-		document.getElementById("fe_alpha_process").value = localsettings.fe_alpha_process;
+		document.getElementById("fe_alpha_mix").value = localsettings.fe_alpha_mix;
 		document.getElementById("fe_ou_theta").value = localsettings.fe_ou_theta;
 		document.getElementById("fe_ou_sigma").value = localsettings.fe_ou_sigma;
 		document.getElementById("dry_base").value = localsettings.dry_base;
@@ -17359,7 +17359,7 @@ Current version indicated by LITEVER below.
 		document.getElementById("fe_rel_prob_threshold").value = cleannum(parseFloat(document.getElementById("fe_rel_prob_threshold").value), 0, 1);
 		document.getElementById("fe_alpha_min").value = cleannum(parseFloat(document.getElementById("fe_alpha_min").value), -10, 10);
 		document.getElementById("fe_alpha_max").value = cleannum(parseFloat(document.getElementById("fe_alpha_max").value), -10, 10);
-		document.getElementById("fe_alpha_process").value = cleannum(parseInt(document.getElementById("fe_alpha_process").value), 0, 1);
+		document.getElementById("fe_alpha_mix").value = cleannum(parseFloat(document.getElementById("fe_alpha_mix").value), 0, 1);
 		document.getElementById("fe_ou_theta").value = cleannum(parseFloat(document.getElementById("fe_ou_theta").value), 0, 1);
 		document.getElementById("fe_ou_sigma").value = cleannum(parseFloat(document.getElementById("fe_ou_sigma").value), 0, 10);
 		document.getElementById("miro_type").value = cleannum(parseInt(document.getElementById("miro_type").value), 0, 2);
@@ -17423,7 +17423,7 @@ Current version indicated by LITEVER below.
 			fe_rel_prob_threshold: parseFloat(document.getElementById("fe_rel_prob_threshold").value),
 			fe_alpha_min: parseFloat(document.getElementById("fe_alpha_min").value),
 			fe_alpha_max: parseFloat(document.getElementById("fe_alpha_max").value),
-			fe_alpha_process: parseInt(document.getElementById("fe_alpha_process").value),
+			fe_alpha_mix: parseFloat(document.getElementById("fe_alpha_mix").value),
 			fe_ou_theta: parseFloat(document.getElementById("fe_ou_theta").value),
 			fe_ou_sigma: parseFloat(document.getElementById("fe_ou_sigma").value),
 			miro_type: parseFloat(document.getElementById("miro_type").value),
@@ -17944,7 +17944,7 @@ Current version indicated by LITEVER below.
 		localsettings.fe_rel_prob_threshold = parseFloat(document.getElementById("fe_rel_prob_threshold").value);
 		localsettings.fe_alpha_min = parseFloat(document.getElementById("fe_alpha_min").value);
 		localsettings.fe_alpha_max = parseFloat(document.getElementById("fe_alpha_max").value);
-		localsettings.fe_alpha_process = parseInt(document.getElementById("fe_alpha_process").value);
+		localsettings.fe_alpha_mix = parseFloat(document.getElementById("fe_alpha_mix").value);
 		localsettings.fe_ou_theta = parseFloat(document.getElementById("fe_ou_theta").value);
 		localsettings.fe_ou_sigma = parseFloat(document.getElementById("fe_ou_sigma").value);
 		localsettings.token_count_multiplier = parseInt(document.getElementById("token_count_multiplier").value);
@@ -22169,7 +22169,7 @@ Current version indicated by LITEVER below.
 			submit_payload.params.future_entropy_rel_prob_threshold = localsettings.fe_rel_prob_threshold;
 			submit_payload.params.future_entropy_alpha_min = localsettings.fe_alpha_min;
 			submit_payload.params.future_entropy_alpha_max = localsettings.fe_alpha_max;
-			submit_payload.params.future_entropy_alpha_process = localsettings.fe_alpha_process;
+			submit_payload.params.future_entropy_alpha_mix = localsettings.fe_alpha_mix;
 			submit_payload.params.future_entropy_ou_theta = localsettings.fe_ou_theta;
 			submit_payload.params.future_entropy_ou_sigma = localsettings.fe_ou_sigma;
 		}
@@ -32319,12 +32319,12 @@ Current version indicated by LITEVER below.
 							<div style="display:flex;width:100%;">
 								<div class="settinglabel settingcell">
 									<div class="justifyleft" style="width:100%">Fut.Entropy Walk <span class="helpicon">?<span class="helptext">
-										Alpha-generating process. Src: 0 = sine wave (periodic, uses the Fut.Entropy Wave fields), 1 = mean-reverting random walk (Ornstein-Uhlenbeck): each generated token, alpha drifts a fraction Theta back toward the baseline Alpha and is jolted by a random shock scaled by Vol. Theta 0 never returns to baseline; Vol. 0 keeps alpha constant. The alpha path is printed to the server console after each generation.</span></span></div>
+										Alpha source. Mix blends the two sources: 0 = sine wave only (periodic, uses the Fut.Entropy Wave fields), 1 = mean-reverting random walk (Ornstein-Uhlenbeck) only, in between = weighted blend (mix × walk + (1−mix) × wave). Walk: each generated token, alpha drifts a fraction Theta back toward the baseline Alpha and is jolted by a random shock scaled by Vol. Theta 0 never returns to baseline; Vol. 0 keeps the walk constant. The alpha path is printed to the server console after each generation.</span></span></div>
 									<div style="display:flex;">
 										<div class="settinglabel settingcell">
-											<div title="Alpha Source (0 = Sine, 1 = Random Walk)" class="justifyleft" style="width:100%">Src</div>
+											<div title="Alpha Source Mix (0 = Sine, 1 = Random Walk, 0.75 = 75% walk + 25% wave)" class="justifyleft" style="width:100%">Mix</div>
 											<div class="justifyleft" style="width:100%">
-											<input title="Alpha-generating process (0 = sine wave, 1 = mean-reverting random walk)" class="settinglabel miniinput" type="text" inputmode="numeric" placeholder="0" value="0" id="fe_alpha_process"></div>
+											<input title="Blend of alpha sources (0 = sine wave only, 1 = random walk only, in between = weighted mix)" class="settinglabel miniinput" type="text" inputmode="decimal" placeholder="0.0" value="0.0" id="fe_alpha_mix"></div>
 										</div>
 										<div class="settinglabel settingcell">
 											<div title="Mean-Reversion Rate" class="justifyleft" style="width:100%">Theta</div>

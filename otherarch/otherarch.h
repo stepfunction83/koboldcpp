@@ -66,7 +66,7 @@ struct kcpp_params {
     float   fe_rel_prob_threshold = 0.0f; // lookahead only for candidates >= this fraction of top probability (0 = all)
     float   fe_alpha_min         = -1.0f; // lower bound for wave-modulated alpha (0/0 pair = unset, use [-1,1])
     float   fe_alpha_max         = 1.0f;  // upper bound for wave-modulated alpha
-    int32_t fe_alpha_process     = 0;     // alpha-generating process: 0 = sine wave, 1 = Ornstein-Uhlenbeck random walk
+    float   fe_alpha_mix         = 0.0f;  // blend of alpha sources: 0 = sine only, 1 = Ornstein-Uhlenbeck walk only
     float   fe_ou_theta          = 0.0f;  // OU mean-reversion rate toward baseline alpha (per token)
     float   fe_ou_sigma          = 0.0f;  // OU volatility (per-token shock stddev)
 

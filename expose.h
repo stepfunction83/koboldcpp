@@ -162,7 +162,7 @@ struct generation_inputs
     const float fe_rel_prob_threshold = 0.0f;    // only compute lookahead for candidates whose probability is at least this fraction of the top candidate's; 0 = all candidates
     const float fe_alpha_min = -1.0f;              // lower bound for (wave-modulated) alpha; 0/0 pair means unset and falls back to [-1, 1]
     const float fe_alpha_max = 1.0f;               // upper bound for (wave-modulated) alpha
-    const int fe_alpha_process = 0;                // alpha-generating process: 0 = sine wave, 1 = Ornstein-Uhlenbeck random walk
+    const float fe_alpha_mix = 0.0f;               // blend of alpha sources: 0 = sine wave only, 1 = Ornstein-Uhlenbeck random walk only, in between = linear mix
     const float fe_ou_theta = 0.0f;                // OU mean-reversion rate toward the baseline alpha (per token, 0..1)
     const float fe_ou_sigma = 0.0f;                // OU volatility: stddev of the random shock applied to alpha each token
 };
