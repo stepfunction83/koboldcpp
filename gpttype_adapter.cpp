@@ -3794,8 +3794,15 @@ ModelLoadResult gpttype_load_model(const load_model_inputs inputs, FileFormat in
         //set some ctx params early so autofit can use them.
         llama_ctx_params.flash_attn_type = (kcpp_data->flash_attn?LLAMA_FLASH_ATTN_TYPE_ENABLED:LLAMA_FLASH_ATTN_TYPE_DISABLED);
         llama_ctx_params.swa_full = kcpp_data->swa_full;
-        llama_ctx_params.type_k = (inputs.quant_k==4?GGML_TYPE_Q4_0:(inputs.quant_k==3?GGML_TYPE_Q5_1:(inputs.quant_k==2?GGML_TYPE_Q8_0:(inputs.quant_k==1?GGML_TYPE_BF16:GGML_TYPE_F16))));
-        llama_ctx_params.type_v = (inputs.quant_v==4?GGML_TYPE_Q4_0:(inputs.quant_v==3?GGML_TYPE_Q5_1:(inputs.quant_v==2?GGML_TYPE_Q8_0:(inputs.quant_v==1?GGML_TYPE_BF16:GGML_TYPE_F16))));
+        // KV cache data type table. Index order MUST match `cache_kv_types` in koboldcpp.py.
+        static const ggml_type kcpp_kv_cache_types[] = {
+            GGML_TYPE_F16, GGML_TYPE_F32, GGML_TYPE_BF16, GGML_TYPE_Q8_0, GGML_TYPE_Q4_0,
+            GGML_TYPE_Q4_1, GGML_TYPE_IQ4_NL, GGML_TYPE_Q5_0, GGML_TYPE_Q5_1
+        };
+        constexpr int kcpp_kv_cache_types_count = sizeof(kcpp_kv_cache_types) / sizeof(kcpp_kv_cache_types[0]);
+        auto kcpp_kv_cache_type = [&](int idx)->ggml_type { return (idx >= 0 && idx < kcpp_kv_cache_types_count) ? kcpp_kv_cache_types[idx] : GGML_TYPE_F16; };
+        llama_ctx_params.type_k = kcpp_kv_cache_type(inputs.quant_k);
+        llama_ctx_params.type_v = kcpp_kv_cache_type(inputs.quant_v);
 
         //apply overrides from autofit
         float tensor_split_temp[128] = {0}; //temp buffer for autofit

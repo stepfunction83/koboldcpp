@@ -71,6 +71,21 @@ swa_padding_default = 0
 default_reqtimeout = 600 # 10 min default
 default_maxctx = 12288
 
+# Canonical KV cache data-type order (llama.cpp -ctk / -ctv parity). The index of each entry
+# is the integer passed to InputSentData.quant_k / quant_v, and MUST match kcpp_kv_cache_types[]
+# in gpttype_adapter.cpp. Index 0 (f16) is the default.
+cache_kv_types = ["f16", "f32", "bf16", "q8_0", "q4_0", "q4_1", "iq4_nl", "q5_0", "q5_1"]
+
+def cache_kv_type_index(value, default=0):
+    # Map a KV cache data-type name (or legacy numeric alias) to its index in cache_kv_types.
+    s = str(value).strip().lower()
+    if s in cache_kv_types:
+        return cache_kv_types.index(s)
+    legacy = {"0": "f16", "1": "q8_0", "2": "q4_0", "3": "bf16"}  # pre-string config format
+    if s in legacy:
+        return cache_kv_types.index(legacy[s])
+    return default
+
 # abuse prevention
 stop_token_max = 256
 ban_token_max = 768
@@ -2115,26 +2130,17 @@ def load_model(model_filename):
     inputs.use_contextshift = (0 if args.noshift else 1)
     inputs.use_fastforward = (0 if args.nofastforward else 1)
     inputs.flash_attention =  (False if args.noflashattention else True)
-    if args.quantkv:
-        qkvstr = str(args.quantkv).lower()
-        qkvval = 0
-        if qkvstr=="bf16" or qkvstr=="3": #migration for old index based values
-            qkvval = 1
-        elif qkvstr=="q8_0" or qkvstr=="1":
-            qkvval = 2
-        elif qkvstr=="q5_1":
-            qkvval = 3
-        elif qkvstr=="q4_0" or qkvstr=="2":
-            qkvval = 4
-        if args.noflashattention:
-            inputs.quant_k = qkvval
-            inputs.quant_v = 0 if qkvval!=1 else qkvval
-            if qkvval>1:
-                print("\nWarning: Quantized KV was used without flash attention! This is NOT RECOMMENDED!\nOnly K cache can be quantized, and performance can suffer.\nIn some cases, it might even use more VRAM when doing a full offload.\nYou are strongly encouraged to use flash attention if you want to use quantkv.")
-        else:
-            inputs.quant_k = inputs.quant_v = qkvval
-    else:
-        inputs.quant_k = inputs.quant_v = 0
+    # Resolve independent K/V KV-cache data types (llama.cpp -ctk / -ctv equivalent).
+    # args.quantk / args.quantv override the combined args.quantkv shorthand when set.
+    _qk_name = args.quantk if getattr(args, "quantk", None) else args.quantkv
+    _qv_name = args.quantv if getattr(args, "quantv", None) else args.quantkv
+    inputs.quant_k = cache_kv_type_index(_qk_name, 0)
+    inputs.quant_v = cache_kv_type_index(_qv_name, 0)
+    # Without flash attention, only f16/f32/bf16 (indices 0-2) are valid for the V cache.
+    # Any quantized V type (q8_0 and up) is forced back to f16. The K cache is unrestricted.
+    if args.noflashattention and inputs.quant_v > 2:
+        inputs.quant_v = 0
+        print("\nWarning: A quantized V cache was requested without flash attention! Only f16/f32/bf16 are supported for the V cache in this mode.\nThe V cache has been forced to f16. Enable flash attention to quantize the V cache.")
     inputs.batchsize = args.batchsize
     inputs.autofit = args.autofit
     inputs.autofit_tax_mb = int(args.autofitpadding) + int(calulated_gpu_overhead/(1024*1024))
@@ -8721,7 +8727,6 @@ def show_gui():
     batchsize_values = ["-1","16","32","64","128","256","512","1024","2048","4096"]
     batchsize_text = ["Don't Batch","16","32","64","128","256","512","1024","2048","4096"]
     contextsize_text = ["256", "512", "1024", "2048", "3072", "4096", "5120", "6144", "7168", "8192", "9216", "10240", "11264", "12288", "13312", "14336", "15360", "16384", "18432", "20480", "22528", "24576", "26624", "28672", "30720", "32768", "36864", "40960", "45056", "49152", "53248", "57344", "61440", "65536", "73728", "81920", "90112", "98304", "106496", "114688", "122880", "131072", "147456", "163840", "180224", "196608", "212992", "229376", "245760", "262144" ]
-    quantkv_text = ["f16","bf16","q8_0","q5_1","q4_0"]
 
     if not any(runopts):
         exitcounter = 999
@@ -8748,7 +8753,8 @@ def show_gui():
 
     lowvram_var = ctk.IntVar()
     mmq_var = ctk.IntVar(value=1)
-    quantkv_var = ctk.IntVar(value=0)
+    quantk_var = ctk.IntVar(value=0)
+    quantv_var = ctk.IntVar(value=0)
     blas_threads_var = ctk.StringVar()
     blas_size_var = ctk.IntVar()
     autofit_var = ctk.IntVar()
@@ -9307,18 +9313,22 @@ def show_gui():
         else:
             fastforward_var.set(1)
             smartcontextbox.grid_remove()
-        qkvslider.grid()
+        qkslider.grid()
         qkvlabel.grid()
-        if flashattention_var.get()==0 and (quantkv_var.get()>1):
+        qvslider.grid()
+        qvlabel.grid()
+        if flashattention_var.get()==0 and (quantv_var.get()>2):
             noqkvlabel.grid()
         else:
             noqkvlabel.grid_remove()
 
 
     def toggleflashattn(a,b,c):
-        qkvslider.grid()
+        qkslider.grid()
         qkvlabel.grid()
-        if flashattention_var.get()==0 and (quantkv_var.get()>1):
+        qvslider.grid()
+        qvlabel.grid()
+        if flashattention_var.get()==0 and (quantv_var.get()>2):
             noqkvlabel.grid()
         else:
             noqkvlabel.grid_remove()
@@ -9564,10 +9574,12 @@ def show_gui():
     manualropebox = makecheckbox(context_tab, "Manual Rope Scale", variable=manualrope_var, row=22, command=togglerope, padx=(200), tooltiptxt="Set RoPE base and scale manually.")
 
     makecheckbox(context_tab, "Custom RoPE Config", variable=customrope_var, row=22, command=togglerope,tooltiptxt="Override the default RoPE configuration with custom RoPE scaling.")
-    noqkvlabel = makelabel(context_tab,"(Note: QuantKV works best with flash attention)",30,0,"Only K cache can be quantized, and performance can suffer.\nIn some cases, it might even use more VRAM when doing a full offload.",padx=160)
+    noqkvlabel = makelabel(context_tab,"(Note: Quantized V cache requires flash attention)",30,0,"Without flash attention, the V cache falls back to f16 and only the K cache can be quantized. Performance can suffer.\nIn some cases, it might even use more VRAM when doing a full offload.",padx=160)
     noqkvlabel.configure(text_color="#ff5555")
-    qkvslider,qkvlabel,qkvtitle = makeslider(context_tab, "Quantize KV Cache:", quantkv_text, quantkv_var, 30, set=0,tooltip="Enable quantization of KV cache.\nRequires Flash Attention for full effect, otherwise only K cache is quantized.")
-    quantkv_var.trace_add("write", toggleflashattn)
+    qkslider,qkvlabel,qktitle = makeslider(context_tab, "Quantize KV Cache (K):", cache_kv_types, quantk_var, 30, set=0,tooltip="KV cache data type for the K cache.\nAny type is supported, and quantizing K saves VRAM.")
+    qvslider,qvlabel,qvtitle = makeslider(context_tab, "Quantize KV Cache (V):", cache_kv_types, quantv_var, 33, set=0,tooltip="KV cache data type for the V cache.\nQuantized V requires Flash Attention, otherwise it falls back to f16.")
+    quantk_var.trace_add("write", toggleflashattn)
+    quantv_var.trace_add("write", toggleflashattn)
     makecheckbox(context_tab, "No BOS Token", nobostoken_var, 43, tooltiptxt="Prevents BOS token from being added at the start of any prompt. Usually NOT recommended for most models.")
     makecheckbox(context_tab, "Enable Guidance", enableguidance_var, 43,padx=(140), tooltiptxt="Enables the use of Classifier-Free-Guidance, which allows the use of negative prompts. Has performance and memory impact.")
     def togglejinja(a,b,c):
@@ -10042,8 +10054,8 @@ def show_gui():
         args.quiet = quietmode.get()==1
         args.nocertify = nocertifymode.get()==1
         args.nomodel = nomodel.get()==1
-        qkvopt = quantkv_text[quantkv_var.get()].lower() if (quantkv_var.get()>=0 and quantkv_var.get() < len(quantkv_text)) else "f16"
-        args.quantkv = qkvopt
+        args.quantk = cache_kv_types[quantk_var.get()] if (quantk_var.get()>=0 and quantk_var.get() < len(cache_kv_types)) else "f16"
+        args.quantv = cache_kv_types[quantv_var.get()] if (quantv_var.get()>=0 and quantv_var.get() < len(cache_kv_types)) else "f16"
         args.lowvram = lowvram_var.get()==1
         args.nommq = mmq_var.get()==0
         args.splitmode = splitmode_var.get() if splitmode_var.get() in splitmode_choices else splitmode_choices[0]
@@ -10294,18 +10306,12 @@ def show_gui():
         nocertifymode.set(1 if "nocertify" in mydict and mydict["nocertify"] else 0)
         nomodel.set(1 if "nomodel" in mydict and mydict["nomodel"] else 0)
         lowvram_var.set(1 if "lowvram" in mydict and mydict["lowvram"] else 0)
-        if "quantkv" in mydict:
-            qkvstr = str(mydict["quantkv"]).lower()
-            qkvval = 0
-            if qkvstr=="bf16" or qkvstr=="3": #migration for old index based values
-                qkvval = 1
-            elif qkvstr=="q8_0" or qkvstr=="1":
-                qkvval = 2
-            elif qkvstr=="q5_1":
-                qkvval = 3
-            elif qkvstr=="q4_0" or qkvstr=="2":
-                qkvval = 4
-            quantkv_var.set(qkvval)
+        # KV cache data type: prefer independent K/V selections, falling back to legacy combined quantkv
+        _legacy_qkv = mydict["quantkv"] if "quantkv" in mydict else "f16"
+        _qk = mydict["quantk"] if ("quantk" in mydict and mydict["quantk"]) else _legacy_qkv
+        _qv = mydict["quantv"] if ("quantv" in mydict and mydict["quantv"]) else _legacy_qkv
+        quantk_var.set(cache_kv_type_index(_qk, 0))
+        quantv_var.set(cache_kv_type_index(_qv, 0))
         if "usecuda" in mydict and mydict["usecuda"] is not None:
             if cublas_option is not None or hipblas_option is not None:
                 if cublas_option:
@@ -13083,7 +13089,9 @@ if __name__ == '__main__':
     advparser.add_argument("--password", metavar=('[API key]'), help="Enter a password required to use this instance. This key will be required for all text endpoints. Image endpoints are not secured. Can also be set with env var KCPP_PASSWORD", default=os.getenv('KCPP_PASSWORD',None))
     advparser.add_argument("--preloadstory", metavar=('[savefile]'), help="Configures a prepared story json save file to be hosted on the server, which frontends (such as KoboldAI Lite) can access over the API.", default="")
     advparser.add_argument("--prompt","-p", metavar=('[prompt]'), help="Passing a prompt string triggers a direct inference, loading the model, outputs the response to stdout and exits. Can be used alone or with benchmark.", type=str, default="")
-    advparser.add_argument("--quantkv", help="Sets the KV cache data type quantization, options are f16/bf16/q8_0/q5_1/q4_0. Requires Flash Attention for full effect, otherwise only K cache is quantized.",metavar=('[quantization level f16/bf16/q8_0/q5_1/q4_0]'), type=str, choices=["f16","bf16","q8_0","q5_1","q4_0","0","1","2","3"], default="f16")
+    advparser.add_argument("--quantkv", help="Sets the KV cache data type for BOTH the K and V caches (shorthand for --quantk/--quantv). Individual caches can be overridden separately. Without flash attention, quantized V falls back to f16.", metavar=('[f16/f32/bf16/q8_0/q4_0/q4_1/iq4_nl/q5_0/q5_1]'), type=str, choices=cache_kv_types+["0","1","2","3"], default="f16")
+    advparser.add_argument("--quantk", help="KV cache data type for the K cache only (equivalent to llama.cpp -ctk). Overrides --quantkv for K.", metavar=('[f16/f32/bf16/q8_0/q4_0/q4_1/iq4_nl/q5_0/q5_1]'), type=str, choices=cache_kv_types, default=None)
+    advparser.add_argument("--quantv", help="KV cache data type for the V cache only (equivalent to llama.cpp -ctv). Overrides --quantkv for V. Requires flash attention for quantized V, otherwise falls back to f16.", metavar=('[f16/f32/bf16/q8_0/q4_0/q4_1/iq4_nl/q5_0/q5_1]'), type=str, choices=cache_kv_types, default=None)
     advparser.add_argument("--quiet", help="Enable quiet mode, which hides generation inputs and outputs in the terminal. Quiet mode is automatically enabled when running a horde worker.", action='store_true')
     advparser.add_argument("--ratelimit", metavar=('[seconds]'), help="If enabled, rate limit generative request by IP address. Each IP can only send a new request once per X seconds.", type=int, default=0)
     advparser.add_argument("--reasoningeffort", help="A quick way to set the default reasoning effort. API values override this.", type=str, choices=['default','none','low','medium','high','xhigh'], default="default")

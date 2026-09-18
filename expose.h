@@ -75,8 +75,11 @@ struct load_model_inputs
     const char * override_tensors = nullptr;
     const bool flash_attention = false;
     const float tensor_split[tensor_split_max] = {};
-    const int quant_k = 0;
-    const int quant_v = 0;
+    // KV cache data type index for K and V, independently. Index into the canonical
+    // cache-type list: 0=f16,1=f32,2=bf16,3=q8_0,4=q4_0,5=q4_1,6=iq4_nl,7=q5_0,8=q5_1.
+    // Order MUST match `cache_kv_types` in koboldcpp.py and kcpp_kv_cache_types[] in gpttype_adapter.cpp.
+    const int quant_k = 0; // 0 = f16 (default)
+    const int quant_v = 0; // 0 = f16 (default)
     const bool check_slowness = false;
     const char * jinja_template = nullptr;
     const bool highpriority = false;
